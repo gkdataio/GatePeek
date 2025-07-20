@@ -13,7 +13,7 @@ A comprehensive Python tool for subdomain enumeration and reconnaissance with ad
 ### Quick Install
 ```bash
 # Clone or download the repository
-git clone <repository-url>
+git clone https://github.com/gkdataio/GatePeek.git
 cd gatekeep
 
 # Install dependencies
