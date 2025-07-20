@@ -2,6 +2,8 @@
 
 A comprehensive Python tool for subdomain enumeration and reconnaissance with advanced HTTP testing capabilities.
 
+![Gatepeek Screenshot](screenshot.png)
+
 ## Installation
 
 ### Prerequisites
