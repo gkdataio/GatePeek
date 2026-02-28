@@ -5,11 +5,12 @@
 DISPLAY_HEADERS = ["Server", "Content-Type", "Location"]
 
 # False Positive Indicators for Response Classification
+# Only include phrases that are unambiguous error/block signals.
+# "nginx" and "apache" are removed — they are server software names that
+# appear in valid 200 OK responses and do not indicate a false positive.
 FALSE_POSITIVE_INDICATORS = [
     "403 forbidden",
     "access denied",
-    "nginx",
-    "apache",
     "cloudflare",
     "forbidden",
     "unauthorized",
