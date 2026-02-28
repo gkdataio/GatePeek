@@ -2,8 +2,9 @@ import requests
 import socket
 import re
 import time
+import copy
 from colorama import Fore, Style, init
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import textwrap
 import json
@@ -13,7 +14,10 @@ import OpenSSL.crypto
 import html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from modules.arrays import *
-from modules.arrays.api_config import MAX_WORKERS, DNS_WORKERS, HTTP_WORKERS, GITHUB_WORKERS
+from modules.arrays.api_config import (
+    MAX_WORKERS, DNS_WORKERS, HTTP_WORKERS, GITHUB_WORKERS,
+    DNS_TIMEOUT, HTTP_TIMEOUT, GITHUB_TIMEOUT, SSL_TIMEOUT,
+)
 from modules.html_generator import HTMLReportGenerator
 
 init(autoreset=True)
@@ -126,18 +130,20 @@ def fetch_github_page(domain, page, headers):
     q = f"{domain}+in:file"
     url = f"https://api.github.com/search/code?q={q}&per_page={GITHUB_PER_PAGE}&page={page}"
     try:
-        r = requests.get(url, headers=headers, timeout=TIMEOUT)
-        if r.status_code == 403:
+        r = requests.get(url, headers=headers, timeout=GITHUB_TIMEOUT)
+        if r.status_code == 401:
+            return None, "invalid_token"
+        elif r.status_code == 403:
             return None, "rate_limit"
         elif r.status_code != 200:
             return None, f"error_{r.status_code}"
-        
+
         items = r.json().get("items", [])
         if not items:
             return [], "no_items"
-        
+
         return items, "success"
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         return None, f"exception_{str(e)}"
 
 def process_github_item(item, domain):
@@ -146,7 +152,7 @@ def process_github_item(item, domain):
     raw_url = html_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
     
     try:
-        code = requests.get(raw_url, timeout=10).text  # Shorter timeout for raw content
+        code = requests.get(raw_url, timeout=GITHUB_TIMEOUT).text
         found = {}
         
         # Process each line to get line numbers
@@ -167,11 +173,17 @@ def process_github_item(item, domain):
 def get_subdomains_github(domain, max_pages=GITHUB_MAX_PAGES):
     """Get subdomains from GitHub using parallel processing with line-level context"""
     print(f"{Fore.BLUE}[*] Pulling from GitHub code search...")
+
+    if not GITHUB_TOKEN:
+        print(f"{Fore.YELLOW}[!] GITHUB_TOKEN env var not set — requests will be unauthenticated "
+              f"(60 req/hr limit). Set GITHUB_TOKEN for 5,000 req/hr.")
+
     headers = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "X-GitHub-Api-Version": GITHUB_API_VERSION
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     
     found = {}  # Changed from set() to dict() to store context
     
@@ -189,7 +201,10 @@ def get_subdomains_github(domain, max_pages=GITHUB_MAX_PAGES):
             try:
                 items, status = future.result()
                 
-                if status == "rate_limit":
+                if status == "invalid_token":
+                    print(f"{Fore.RED}[!] GitHub token is invalid — check GITHUB_TOKEN env var.")
+                    break
+                elif status == "rate_limit":
                     print(f"{Fore.RED}[!] GitHub rate limit hit on page {page}.")
                     break
                 elif status.startswith("error_"):
@@ -233,7 +248,7 @@ def resolve_ip(sub):
     """Resolve IP address for a subdomain"""
     try:
         return socket.gethostbyname(sub)
-    except:
+    except (socket.gaierror, socket.timeout, OSError):
         return None
 
 def resolve_ips_parallel(subdomains):
@@ -266,18 +281,18 @@ def check_http(sub, session_manager=None):
         # Fallback to regular requests if no session provided
         for proto in HTTP_PROTOCOLS:
             try:
-                r = requests.get(proto + sub, timeout=TIMEOUT, allow_redirects=True, verify=False)
+                r = requests.get(proto + sub, timeout=HTTP_TIMEOUT, allow_redirects=True, verify=False)
                 return r.status_code, dict(r.headers), r.text
-            except:
+            except requests.exceptions.RequestException:
                 continue
         return None, {}, ""
-    
+
     # Use session manager for better performance
     for proto in HTTP_PROTOCOLS:
         try:
             r = session_manager.get(proto + sub)
             return r.status_code, dict(r.headers), r.text
-        except:
+        except requests.exceptions.RequestException:
             continue
     return None, {}, ""
 
@@ -338,13 +353,13 @@ def bypass_403(sub, session_manager=None):
             if session_manager:
                 r = session_manager.get(base_url, headers=headers)
             else:
-                r = requests.get(base_url, headers=headers, timeout=TIMEOUT, verify=False, allow_redirects=True)
-            
+                r = requests.get(base_url, headers=headers, timeout=HTTP_TIMEOUT, verify=False, allow_redirects=True)
+
             if r.status_code not in BYPASS_STATUS_CODES:
                 return r.status_code, dict(r.headers), {"bypass_type": "header", "headers": headers}, r.text
-        except:
+        except requests.exceptions.RequestException:
             continue
-    
+
     # Try path-based bypasses
     for path in BYPASS_PATHS:
         try:
@@ -352,13 +367,13 @@ def bypass_403(sub, session_manager=None):
             if session_manager:
                 r = session_manager.get(path_url)
             else:
-                r = requests.get(path_url, timeout=TIMEOUT, verify=False, allow_redirects=True)
-            
+                r = requests.get(path_url, timeout=HTTP_TIMEOUT, verify=False, allow_redirects=True)
+
             if r.status_code not in BYPASS_STATUS_CODES:
                 return r.status_code, dict(r.headers), {"bypass_type": "path", "path": path}, r.text
-        except:
+        except requests.exceptions.RequestException:
             continue
-    
+
     # Try combination of headers and paths
     for path in BYPASS_PATHS[:10]:  # Limit to first 10 paths for combinations
         for headers in payloads[:5]:  # Limit to first 5 headers for combinations
@@ -367,11 +382,11 @@ def bypass_403(sub, session_manager=None):
                 if session_manager:
                     r = session_manager.get(path_url, headers=headers)
                 else:
-                    r = requests.get(path_url, headers=headers, timeout=TIMEOUT, verify=False, allow_redirects=True)
-                
+                    r = requests.get(path_url, headers=headers, timeout=HTTP_TIMEOUT, verify=False, allow_redirects=True)
+
                 if r.status_code not in BYPASS_STATUS_CODES:
                     return r.status_code, dict(r.headers), {"bypass_type": "combination", "path": path, "headers": headers}, r.text
-            except:
+            except requests.exceptions.RequestException:
                 continue
     
     return None, {}, None, ""
@@ -405,28 +420,30 @@ def get_ssl_info(ip, domain):
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        
+
         # Connect to the server
-        with socket.create_connection((ip, SSL_PORT), timeout=TIMEOUT) as sock:
+        with socket.create_connection((ip, SSL_PORT), timeout=SSL_TIMEOUT) as sock:
             with context.wrap_socket(sock, server_hostname=domain) as ssock:
                 cert = ssock.getpeercert(binary_form=True)
                 x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, cert)
-                
+
                 # Extract certificate information
                 subject = dict(x509.get_subject().get_components())
                 issuer = dict(x509.get_issuer().get_components())
-                
-                # Format dates
+
+                # Parse dates (cert timestamps are UTC)
                 not_before = datetime.strptime(x509.get_notBefore().decode('ascii'), '%Y%m%d%H%M%SZ')
                 not_after = datetime.strptime(x509.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ')
-                
+                is_expired = not_after < datetime.utcnow()
+
                 return {
                     'subject': {k.decode(): v.decode() for k, v in subject.items()},
                     'issuer': {k.decode(): v.decode() for k, v in issuer.items()},
                     'valid_from': not_before.strftime('%Y-%m-%d %H:%M:%S'),
-                    'valid_until': not_after.strftime('%Y-%m-%d %H:%M:%S')
+                    'valid_until': not_after.strftime('%Y-%m-%d %H:%M:%S'),
+                    'is_expired': is_expired,
                 }
-    except Exception as e:
+    except Exception:
         return None
 
 def test_http_methods(sub, ip, session_manager=None):
@@ -472,7 +489,7 @@ def test_http_methods(sub, ip, session_manager=None):
                     response_preview = json.dumps(json_response, indent=2)[:RESPONSE_PREVIEW_LENGTH]
                     if len(json.dumps(json_response)) > RESPONSE_PREVIEW_LENGTH:
                         response_preview += "..."
-                except:
+                except (json.JSONDecodeError, ValueError):
                     pass
             elif is_html:
                 # For HTML, show the first few lines
@@ -518,7 +535,8 @@ def print_result_box(sub, ip, status, headers, body, bypass=None, session_manage
     ]
     
     if ssl_info:
-        content.append(f"{color}│ {Fore.WHITE}SSL    : Valid{color}│")
+        ssl_status = f"{Fore.RED}Expired{color}" if ssl_info.get('is_expired') else "Valid"
+        content.append(f"{color}│ {Fore.WHITE}SSL    : {ssl_status}{color}│")
         content.append(f"{color}│ {Fore.WHITE}Valid   : {ssl_info['valid_from']} to {ssl_info['valid_until']}{color}│")
         content.append(f"{color}│ {Fore.WHITE}Issuer  : {ssl_info['issuer'].get('CN', 'N/A')}{color}│")
     else:
@@ -650,26 +668,25 @@ def print_subdomain_summary(results):
     print(f"{Fore.CYAN}└{'─' * (width-2)}┘\n")
 
 def save_json_summary(domain, results):
-    # Create results directory if it doesn't exist
-    if not os.path.exists(RESULTS_DIR):
-        os.makedirs(RESULTS_DIR)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
     
     # Group subdomains by status
-    summary = DEFAULT_SUMMARY_STRUCTURE.copy()
+    summary = copy.deepcopy(DEFAULT_SUMMARY_STRUCTURE)
     summary["domain"] = domain
     summary["scan_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary["total_subdomains"] = len(results)
-    
+
     for result in results:
         subdomain_data = {
             "subdomain": result['subdomain'],
             "ip": result['ip'],
             "status": result['status'],
-            "headers": result['headers']
+            "headers": result['headers'],
+            "sources": result.get('sources', []),
         }
         if result.get('bypass'):
             subdomain_data['bypass'] = result['bypass']
-        
+
         # Add GitHub context if available
         if result.get('github_context'):
             subdomain_data['github_context'] = result['github_context']
@@ -697,9 +714,7 @@ def save_json_summary(domain, results):
     return filepath
 
 def save_initial_subdomains(domain, subdomains):
-    # Create results directory if it doesn't exist
-    if not os.path.exists(RESULTS_DIR):
-        os.makedirs(RESULTS_DIR)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
     
     # Create simple summary with just subdomains
     summary = {
@@ -744,6 +759,15 @@ def main(domain):
     github_subs = set(github_with_context.keys())
     subs = github_subs | center | wayback
     print(f"{Fore.CYAN}[+] Total unique subdomains: {len(subs)}\n")
+
+    # Track which source(s) each subdomain was discovered from
+    subdomain_sources: dict[str, list[str]] = {}
+    for sub in github_subs:
+        subdomain_sources.setdefault(sub, []).append("github")
+    for sub in center:
+        subdomain_sources.setdefault(sub, []).append("subdomain_center")
+    for sub in wayback:
+        subdomain_sources.setdefault(sub, []).append("wayback")
     
     # Print GitHub context information
     if github_with_context:
@@ -793,23 +817,29 @@ def main(domain):
                     # Only consider a true bypass if response is different
                     print(f"{Fore.GREEN}    [+] 403 bypass successful: {bcode} (different content)")
                     result = print_result_box(subdomain, ip, bcode, bheaders, bbody, bused, session_manager, github_context)
+                    result['sources'] = subdomain_sources.get(subdomain, [])
                     results.append(result)
                     continue
                 elif bcode:
                     print(f"{Fore.YELLOW}    [!] 403 bypass returned {bcode} but content unchanged")
                 else:
                     print(f"{Fore.RED}    [-] 403 bypass failed")
-            
+
             # Print result box
             result = print_result_box(subdomain, ip, status, headers, body, session_manager=session_manager, github_context=github_context)
+            result['sources'] = subdomain_sources.get(subdomain, [])
             results.append(result)
     
     # Print summary of all found subdomains
     print_subdomain_summary(results)
-    
+
+    # Save detailed JSON summary
+    json_summary_file = save_json_summary(domain, results)
+    print(f"{Fore.GREEN}[+] JSON summary saved to: {json_summary_file}")
+
     # Generate HTML report
     html_file = generate_html_report(domain, results)
-    print(f"\n{Fore.GREEN}[+] HTML report generated: {html_file}")
+    print(f"{Fore.GREEN}[+] HTML report generated: {html_file}")
 
 if __name__ == "__main__":
     import urllib3
