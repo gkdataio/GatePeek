@@ -1,8 +1,22 @@
+<picture>
+  <source media="(prefers-reduced-motion: reduce) and (max-width: 600px)" srcset="docs/assets/readme/hero-mobile-static.png">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/readme/hero-static.png">
+  <source media="(max-width: 600px)" srcset="docs/assets/readme/hero-mobile.gif">
+  <img src="docs/assets/readme/hero.gif" width="1120" alt="GatePeek — subdomains, sources, and context">
+</picture>
+
 # Gatepeek - Subdomain Reconnaissance Tool
 
-A comprehensive Python tool for subdomain enumeration and reconnaissance with advanced HTTP testing capabilities.
+A Python utility that brings together subdomain sources, DNS and HTTP observations, and linked reports.
 
-![Gatepeek Screenshot](screenshot.png)
+[Installation](#installation) · [Features](#features) · [File structure](#files-structure) · [Reference](#reference)
+
+<details>
+<summary>See the terminal interface</summary>
+
+![GatePeek terminal interface](screenshot.png)
+
+</details>
 
 ## Installation
 
@@ -69,6 +83,11 @@ subgit/
 ├── README.md                # This documentation
 └── results/                 # Output directory for reports
 ```
+
+## Reference
+
+<details>
+<summary><strong>Configuration and detailed reference</strong></summary>
 
 ## Configuration
 
@@ -301,6 +320,8 @@ pip install requests colorama pyOpenSSL
 
 ⚠️ **Important**: The GitHub token in `modules/arrays/api_config.py` should be kept secure and not shared publicly. Consider using environment variables for sensitive tokens in production environments.
 
+</details>
+
 ## License
 
-This tool is for educational and authorized security testing purposes only. Always ensure you have proper authorization before scanning any domains. 
+This tool is for educational and authorized security testing purposes only. Always ensure you have proper authorization before scanning any domains.
